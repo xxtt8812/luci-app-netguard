@@ -1,0 +1,56 @@
+#!/bin/sh /etc/rc.common
+# 2025年智能流量控制脚本
+
+START=99
+USE_PROCD=1
+NFT="/usr/sbin/nft"
+
+init_rules() {
+    # 创建nftables专用链
+    $NFT add table inet netguard
+    $NFT add chain inet netguard filter_chain {
+        type filter hook forward priority 0; policy accept;
+    }
+
+    # 加载时间解析模块
+    . /usr/share/netguard/time_parser.sh
+
+    # 动态规则生成
+    uci -q show netguard | while read -r line; do
+        case $line in
+            *netguard.global*)
+                local mode=$(uci get netguard.@global.mode)
+                ;;
+            *netguard.smart_rule*)
+                local target=$(uci get ${line%.*}.target)
+                local pattern=$(uci get ${line%.*}.pattern)
+                local action=$(uci get ${line%.*}.action)
+                generate_nft_rule $target $pattern $action
+                ;;
+        esac
+    done
+}
+
+generate_nft_rule() {
+    local target_type=$1
+    local pattern=$2
+    local action=$3
+
+    case $target_type in
+        "domain") 
+            $NFT add rule inet netguard filter_chain meta l4proto {tcp, udp} \
+                th dport 53 @nh,144,16 & 0x0f = 0x01 @nh,192,64 & "$pattern" counter $action
+            ;;
+        "ip")
+            $NFT add rule inet netguard filter_chain ip saddr $pattern counter $action
+            ;;
+    esac
+}
+
+start_service() {
+    [ "$(uci get netguard.@global.enable)" = "1" ] || return 0
+    init_rules
+    procd_open_instance
+    procd_set_param command "$NFT" -f /tmp/netguard.rules
+    procd_close_instance
+}
